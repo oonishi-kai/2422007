@@ -1,6 +1,7 @@
 import requests
 import flet as ft
 from datetime import datetime
+import sqlite3
 
 # 地域リストのURL
 AREA_LIST_URL = "http://www.jma.go.jp/bosai/common/const/area.json"
@@ -20,6 +21,26 @@ REGIONS = {
     "沖縄地方": ["471000","472000","473000","474000"]
 }
 
+# データベースの初期化
+def init_db():
+    conn = sqlite3.connect('weather.db')
+    c = conn.cursor()
+
+    # 天気予報テーブルの作成
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS weather_forecast (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            area_code TEXT NOT NULL,
+            date TEXT NOT NULL,
+            forecast TEXT NOT NULL,
+            temperature_min REAL,
+            temperature_max REAL
+        )
+    ''')
+
+    conn.commit()
+    conn.close()
+
 # 地域リストを取得
 def get_area_list():
     response = requests.get(AREA_LIST_URL)
@@ -32,7 +53,31 @@ def get_area_list():
         areas.append((region_code, region_info['name']))
     return areas
 
-def get_weather_forecast(region_code):
+def get_weather_forecast(region_code, date=None):
+    conn = sqlite3.connect('weather.db')
+    c = conn.cursor()
+    
+    if date:
+        # 選択された日付の天気予報をデータベースから取得
+        c.execute('''
+            SELECT date, forecast, temperature_min, temperature_max 
+            FROM weather_forecast 
+            WHERE area_code = ? AND date = ?
+        ''', (region_code, date))
+        results = c.fetchall()
+        if results:
+            forecast_data = []
+            for row in results:
+                forecast_data.append({
+                    "date": datetime.strptime(row[0], '%Y-%m-%d').date(),
+                    "weather": row[1],
+                    "tempMin": row[2],
+                    "tempMax": row[3]
+                })
+            conn.close()
+            return forecast_data
+
+    # データベースに該当する天気予報がない場合、新たに取得
     forecast_url = FORECAST_URL_TEMPLATE.format(region_code)
     response = requests.get(forecast_url)
 
@@ -71,12 +116,27 @@ def get_weather_forecast(region_code):
                 "tempMax": temp_max,
                 "tempMin": temp_min
             })
+            # データベースに保存
+            save_weather_forecast(region_code, date, weather, temp_min, temp_max)
 
     except (IndexError, KeyError) as e:
         print(f"Data Error: {e}")
         return [{"date": "N/A", "weather": "データ取得エラー", "tempMax": "N/A", "tempMin": "N/A"}]
 
     return weather_data
+
+# 天気予報データをDBに保存する関数
+def save_weather_forecast(area_code, date, forecast, temp_min, temp_max):
+    conn = sqlite3.connect('weather.db')
+    c = conn.cursor()
+
+    c.execute('''
+        INSERT INTO weather_forecast (area_code, date, forecast, temperature_min, temperature_max)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (area_code, date, forecast, temp_min, temp_max))
+
+    conn.commit()
+    conn.close()
 
 def main(page: ft.Page):
     region_dropdown = ft.Dropdown(
@@ -86,6 +146,7 @@ def main(page: ft.Page):
     )
 
     prefecture_dropdown = ft.Dropdown(label="県を選択してください", hint_text="県")
+    date_field = ft.TextField(label="日付を入力してください (YYYY-MM-DD)", hint_text="日付", width=200)
 
     weather_info = ft.Row(wrap=True, spacing=10)
 
@@ -101,10 +162,11 @@ def main(page: ft.Page):
 
     def on_prefecture_select(e):
         region_code = prefecture_dropdown.value
-        print(f"Selected region code: {region_code}")
+        selected_date = date_field.value
+        print(f"Selected region code: {region_code}, date: {selected_date}")
         if region_code:
             weather_info.controls.clear()
-            forecast = get_weather_forecast(region_code)
+            forecast = get_weather_forecast(region_code, selected_date)
             for day in forecast:
                 card = ft.Card(
                     content=ft.Container(
@@ -127,6 +189,7 @@ def main(page: ft.Page):
 
     region_dropdown.on_change = on_region_select
     prefecture_dropdown.on_change = on_prefecture_select
+    date_field.on_blur = on_prefecture_select
 
     page.add(
         ft.Column(
@@ -134,6 +197,7 @@ def main(page: ft.Page):
                 ft.Text("天気予報", size=24, weight="bold"),
                 region_dropdown,
                 prefecture_dropdown,
+                date_field,
                 weather_info
             ],
             alignment=ft.MainAxisAlignment.START,
@@ -142,4 +206,5 @@ def main(page: ft.Page):
     )
 
 if __name__ == "__main__":
+    init_db()
     ft.app(target=main)
